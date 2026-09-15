@@ -50,7 +50,7 @@ cd src-tauri && cargo test
 ## Layout
 
 ```
-frontend/            plain HTML/CSS/JS UI + parser iframe relay (no bundler)
+frontend/            plain HTML/CSS/JS UI (no bundler)
 src-tauri/src/
   wcl/               HTTP client for the desktop-client API + parser-code fetch
   parser.rs          Node-sidecar parser driver (spawn + stdin/stdout protocol)
