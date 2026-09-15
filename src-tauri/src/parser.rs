@@ -321,16 +321,29 @@ async fn read_line(stdout: &mut BufReader<ChildStdout>) -> Result<Value> {
 /// Locate `parser-harness.js` next to the app (bundled resource) or in the dev
 /// source tree.
 fn harness_path(app: &AppHandle) -> Result<PathBuf> {
-    if let Ok(p) = app.path().resolve("parser-harness.js", tauri::path::BaseDirectory::Resource) {
-        if p.exists() {
-            return Ok(p);
-        }
+    if let Some(p) = resolve_resource(app, "parser-harness.js") {
+        return Ok(p);
     }
     let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/parser-harness.js");
     if dev.exists() {
         return Ok(dev);
     }
     Err(Error::StartFailed("parser-harness.js not found".into()))
+}
+
+/// Resolve a bundled resource. Resources are declared with a `resources/`
+/// prefix, so Tauri places them under `<resourceDir>/resources/`; also try the
+/// resource root for robustness across bundlers.
+fn resolve_resource(app: &AppHandle, name: &str) -> Option<PathBuf> {
+    use tauri::path::BaseDirectory::Resource;
+    for candidate in [format!("resources/{name}"), name.to_string()] {
+        if let Ok(p) = app.path().resolve(&candidate, Resource) {
+            if p.exists() {
+                return Some(p);
+            }
+        }
+    }
+    None
 }
 
 /// Find a Node.js executable: `LU_NODE`, then the bundled runtime shipped next
@@ -343,10 +356,8 @@ fn find_node(app: &AppHandle) -> Option<PathBuf> {
         }
     }
     let exe = if cfg!(windows) { "node.exe" } else { "node" };
-    if let Ok(bundled) = app.path().resolve(exe, tauri::path::BaseDirectory::Resource) {
-        if bundled.exists() {
-            return Some(bundled);
-        }
+    if let Some(bundled) = resolve_resource(app, exe) {
+        return Some(bundled);
     }
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path).map(|dir| dir.join(exe)).find(|c| c.exists())
