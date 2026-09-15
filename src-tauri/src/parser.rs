@@ -158,11 +158,20 @@ impl ParserBridge {
 
         let node = find_node(app).ok_or(Error::NodeNotFound)?;
         let harness = harness_path(app)?;
-        let mut child = tokio::process::Command::new(&node)
+        let mut command = tokio::process::Command::new(&node);
+        command
             .arg(&harness)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::null());
+        // Don't flash a console window (stealing focus) when spawning node.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+        let mut child = command
             .spawn()
             .map_err(|e| Error::StartFailed(format!("spawning {node:?}: {e}")))?;
 
