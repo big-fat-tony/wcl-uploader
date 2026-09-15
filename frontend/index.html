@@ -35,6 +35,7 @@
           <input id="login-password" type="password" autocomplete="current-password" required />
         </label>
         <label class="row"><input id="login-remember" type="checkbox" /> Remember email</label>
+        <label class="row"><input id="login-remember-password" type="checkbox" /> Remember password (stored in Windows Credential Manager) and log in automatically</label>
         <div class="actions">
           <button id="login-btn" type="submit" class="primary">Log in</button>
         </div>
@@ -128,9 +129,6 @@
       <pre id="log"></pre>
     </section>
   </main>
-
-  <!-- The Warcraft Logs parser page. Hidden; driven via postMessage. -->
-  <iframe id="parser" sandbox="allow-scripts" title="parser" hidden></iframe>
 
   <script src="main.js"></script>
 </body>

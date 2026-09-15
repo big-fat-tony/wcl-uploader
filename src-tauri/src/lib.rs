@@ -4,6 +4,7 @@ mod logfile;
 mod operation;
 mod parser;
 mod session;
+mod settings;
 mod wcl;
 
 use commands::AppState;
@@ -20,17 +21,21 @@ pub fn run() {
             commands::list_game_versions,
             commands::client_version,
             commands::login,
+            commands::auto_login,
             commands::logout,
+            commands::get_settings,
+            commands::save_settings,
+            commands::get_launch_options,
+            commands::exit_app,
             commands::detect_log_directory,
             commands::pick_log_file,
             commands::pick_log_directory,
             commands::start_upload,
             commands::start_live_log,
             commands::cancel_operation,
-            commands::parser_loaded,
-            commands::parser_failed,
-            commands::parser_response,
             commands::open_external,
+            commands::ui_log,
+            commands::parser_selftest,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

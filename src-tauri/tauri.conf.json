@@ -15,11 +15,12 @@
         "width": 960,
         "height": 680,
         "minWidth": 760,
-        "minHeight": 520
+        "minHeight": 520,
+        "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) archon/9.6.43 Chrome/142.0.7444.175 Electron/39.8.10 Safari/537.36"
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-src https://*.warcraftlogs.com; connect-src 'self'"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:"
     }
   },
   "bundle": {
@@ -30,6 +31,9 @@
     "icon": [
       "icons/icon.ico",
       "icons/icon.png"
+    ],
+    "resources": [
+      "resources/parser-harness.js"
     ]
   }
 }

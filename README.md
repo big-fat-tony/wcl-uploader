@@ -11,15 +11,24 @@ upload a finished combat log, or live-log a raid — and nothing else:
 
 ## How it works
 
-Warcraft Logs does not ship its combat-log parser with the client: the official
-app loads it as a web page from `warcraftlogs.com` inside a sandboxed iframe and
-drives it over `postMessage`. This app does the same. The Rust side owns the
-whole flow — login, chunked file reading, zipping, uploading segments, retries —
-and the hidden iframe is only ever asked to parse lines and hand back fights.
-The complete reconstructed protocol is documented in [docs/PROTOCOL.md](docs/PROTOCOL.md).
+Warcraft Logs does not ship its combat-log parser with the client: the site
+serves it as JavaScript from `/desktop-client/parser`. The official app runs it
+in a sandboxed browser iframe; this app instead runs the very same JavaScript in
+a small **Node.js sidecar** (`src-tauri/resources/parser-harness.js`) driven over
+stdin/stdout. That avoids WebView2/Cloudflare/session friction entirely. The Rust
+side owns the whole flow — login, fetching the parser code, chunked file reading,
+zipping, uploading segments, retries — and the sidecar only ever parses lines and
+hands back fights. The complete reconstructed protocol is in
+[docs/PROTOCOL.md](docs/PROTOCOL.md).
 
-Because the parser comes from the server, patch-day format changes are handled
-upstream; this app never needs to understand the combat log format itself.
+Because the parser JavaScript comes from the server, patch-day format changes are
+handled upstream; this app never needs to understand the combat log format itself.
+
+Requests to the parser route must use an Electron-like `User-Agent`
+(`wcl::USER_AGENT`) or the server returns 404.
+
+Requirement: **Node.js 18+** must be on `PATH` (or point `LU_NODE` at a `node`
+executable). Bundling a Node runtime with the installer is a TODO.
 
 ## Building
 
@@ -43,12 +52,13 @@ cd src-tauri && cargo test
 ```
 frontend/            plain HTML/CSS/JS UI + parser iframe relay (no bundler)
 src-tauri/src/
-  wcl/               HTTP client for the desktop-client API
-  parser.rs          Rust side of the parser postMessage protocol
+  wcl/               HTTP client for the desktop-client API + parser-code fetch
+  parser.rs          Node-sidecar parser driver (spawn + stdin/stdout protocol)
   logfile.rs         chunked log reading, header priming, zip payloads
   operation.rs       upload-a-log and live-log state machines
-  session.rs         session cookies → webview
+  settings.rs        remembered email/password (OS keychain) + report options
   commands.rs        Tauri commands exposed to the UI
+  resources/parser-harness.js   Node host that runs the site's parser JS
 docs/PROTOCOL.md     the wire protocol, reconstructed from the official client
 ```
 

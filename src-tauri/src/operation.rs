@@ -14,7 +14,7 @@ use url::Url;
 
 use crate::logfile::{self, FileInfo, FilePart};
 use crate::parser::{self, scalar, FightsResult, LogFilePosition, ParserBridge};
-use crate::session::{self, Credentials};
+use crate::session::Credentials;
 use crate::wcl::{self, CreateReport, SegmentParameters, CLIENT_VERSION};
 
 const MAX_FILE_BYTES: u64 = 3_500_000_000;
@@ -135,7 +135,8 @@ impl Ctx {
             game_version_id,
             credentials,
             cancel,
-            progress: Mutex::new(Progress { kind: kind.to_string(), ..Default::default() }),
+            // The official client numbers segments from 1.
+            progress: Mutex::new(Progress { kind: kind.to_string(), next_segment_id: 1, ..Default::default() }),
             started: Instant::now(),
         }
     }
@@ -173,13 +174,15 @@ impl Ctx {
     }
 
     async fn ensure_parser(&self) -> Result<()> {
-        if self.parser.is_ready() {
+        if self.parser.is_ready().await {
             return Ok(());
         }
         self.phase("loading-parser");
-        session::sync_cookies(&self.app, &self.wcl, &self.base_url).map_err(Error::Message)?;
         let url = parser::parser_url(self.base_url.as_str(), &self.game_version_id);
-        self.parser.load(&self.app, &url).await?;
+        self.log("Fetching parser from the server…");
+        let code = self.wcl.fetch_parser_code(&self.base_url, &url).await?;
+        let version = self.parser.start(&self.app, &code.gamedata_code, &code.parser_code, code.parser_version.clone()).await?;
+        self.log(format!("Parser ready (version {})", parser::scalar(&version)));
         Ok(())
     }
 
@@ -193,7 +196,6 @@ impl Ctx {
                 &self.game_version_id,
             )
             .await?;
-        session::sync_cookies(&self.app, &self.wcl, &self.base_url).map_err(Error::Message)?;
         Ok(())
     }
 

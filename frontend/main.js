@@ -15,91 +15,10 @@ function logLine(message) {
   const ts = new Date().toLocaleTimeString();
   logEl.textContent += `[${ts}] ${message}\n`;
   logEl.scrollTop = logEl.scrollHeight;
+  invoke("ui_log", { message }).catch(() => {});
 }
 $("log-clear").addEventListener("click", () => (logEl.textContent = ""));
 listen("app-log", ({ payload }) => logLine(payload.message));
-
-// ---------------------------------------------------------------------------
-// Parser iframe relay (docs/PROTOCOL.md §2)
-// ---------------------------------------------------------------------------
-const parserFrame = $("parser");
-let parserLoaded = false;
-const pending = []; // { requestId, completed, id }
-let probe = null; // { resolve, timer } while checking a freshly loaded parser
-
-window.addEventListener("message", (event) => {
-  if (event.source !== parserFrame.contentWindow) return;
-  const data = event.data;
-  if (!data || typeof data !== "object") return;
-
-  if (data.message === "set-warning-text") {
-    logLine(`Parser warning: ${data.data}`);
-    return;
-  }
-  if (data.message === "log-message") {
-    logLine(`Parser: ${(Array.isArray(data.data) ? data.data : [data.data]).join(" ")}`);
-    return;
-  }
-  if (probe && data.message === "get-parser-version-completed") {
-    const p = probe;
-    probe = null;
-    clearTimeout(p.timer);
-    p.resolve(data.data);
-    return;
-  }
-  const idx = pending.findIndex(
-    (p) => p.completed === data.message && (p.id === undefined || p.id === data.id)
-  );
-  if (idx < 0) return;
-  const [req] = pending.splice(idx, 1);
-  invoke("parser_response", { requestId: req.requestId, payload: data }).catch(console.error);
-});
-
-listen("parser-request", ({ payload: { requestId, payload, completed } }) => {
-  if (!parserLoaded || !parserFrame.contentWindow) {
-    invoke("parser_response", { requestId, error: "parser is not loaded" }).catch(console.error);
-    return;
-  }
-  pending.push({ requestId, completed, id: payload.id });
-  parserFrame.contentWindow.postMessage(payload, "*");
-});
-
-listen("parser-load", ({ payload: { url } }) => {
-  parserLoaded = false;
-  failPending("parser reloading");
-  parserFrame.src = url;
-});
-
-function failPending(reason) {
-  while (pending.length) {
-    const req = pending.pop();
-    invoke("parser_response", { requestId: req.requestId, error: reason }).catch(console.error);
-  }
-}
-
-// The iframe fires `load` even for an error page (e.g. 401), so probe it.
-parserFrame.addEventListener("load", () => {
-  if (!parserFrame.src || parserFrame.src === "about:blank") return;
-  const version = new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      probe = null;
-      resolve(null);
-    }, 20000);
-    probe = { resolve, timer };
-    parserFrame.contentWindow.postMessage({ message: "get-parser-version" }, "*");
-  });
-  version.then((v) => {
-    if (v === null) {
-      parserLoaded = false;
-      logLine("Parser did not respond. Are you logged in?");
-      invoke("parser_failed", { message: "parser did not respond (not logged in?)" }).catch(console.error);
-    } else {
-      parserLoaded = true;
-      logLine(`Parser ready (version ${v})`);
-      invoke("parser_loaded").catch(console.error);
-    }
-  });
-});
 
 // ---------------------------------------------------------------------------
 // State
@@ -107,6 +26,8 @@ parserFrame.addEventListener("load", () => {
 let session = null; // { gameVersionId, baseUrl, user }
 let gameVersions = [];
 let running = false;
+let settings = {}; // persisted by Rust (see settings.rs); never holds the password
+let launch = {}; // command-line options for headless runs
 
 function fillSelect(select, items, { placeholder } = {}) {
   select.innerHTML = "";
@@ -135,13 +56,64 @@ async function init() {
     $("login-game-version"),
     gameVersions.map((g) => ({ value: g.id, label: g.label }))
   );
-  const savedGv = localStorage.getItem("gameVersionId");
-  if (savedGv) $("login-game-version").value = JSON.stringify(savedGv);
-  const savedEmail = localStorage.getItem("email");
-  if (savedEmail) {
-    $("login-email").value = savedEmail;
+  settings = (await invoke("get_settings")) || {};
+  launch = (await invoke("get_launch_options")) || {};
+  if (settings.gameVersionId) $("login-game-version").value = JSON.stringify(settings.gameVersionId);
+  if (settings.email) {
+    $("login-email").value = settings.email;
     $("login-remember").checked = true;
   }
+  $("login-remember-password").checked = Boolean(settings.rememberPassword);
+
+  if (settings.rememberPassword) {
+    logLine("Logging in with saved credentials\u2026");
+    try {
+      const result = await invoke("auto_login");
+      if (result) {
+        session = result;
+        showUploader();
+        if (launch.uploadFile) {
+          await headlessUpload(launch.uploadFile);
+        }
+        return;
+      }
+    } catch (ex) {
+      logLine(`Automatic login failed: ${ex}`);
+      if (launch.uploadFile) return invoke("exit_app", { code: 2 });
+    }
+  }
+  if (launch.uploadFile) {
+    logLine("--upload needs a remembered login; log in once with Remember password ticked.");
+    return invoke("exit_app", { code: 2 });
+  }
+}
+
+// `--upload <file>`: upload with the saved report options, then exit with
+// 0 on success / 1 on failure so the outcome is scriptable.
+async function headlessUpload(filePath) {
+  $("upload-path").value = filePath;
+  // Ensure a usable selection for an unattended run: Personal Logs + first
+  // region + first visibility, unless settings already provided them.
+  // Prefer a real guild (region is implied); fall back to Personal Logs + a region.
+  const guilds = session.user.guildSelectItems || [];
+  const realGuild = guilds.find((g) => g.value !== PERSONAL_LOGS_GUILD_ID);
+  // Unattended: prefer a real guild (its report always has a valid home).
+  $("opt-guild").value = JSON.stringify((realGuild || guilds[0] || { value: PERSONAL_LOGS_GUILD_ID }).value);
+  onGuildChange();
+  if (selectedValue($("opt-guild")) === PERSONAL_LOGS_GUILD_ID && !selectedValue($("opt-region"))) {
+    if ($("opt-region").options.length > 1) $("opt-region").selectedIndex = 1;
+  }
+  if (!$("opt-visibility").value && $("opt-visibility").options.length) $("opt-visibility").selectedIndex = 0;
+  let report;
+  try {
+    report = reportOptions();
+  } catch (ex) {
+    logLine(ex.message);
+    return invoke("exit_app", { code: 2 });
+  }
+  logLine(`Headless upload: guild=${report.guildId} region=${report.regionOrServerId} vis=${report.visibility}`);
+  const result = await runOperation("start_upload", { filePath, ...report }, "Uploading log");
+  return invoke("exit_app", { code: result && result.ok ? 0 : 1 });
 }
 
 $("login-form").addEventListener("submit", async (e) => {
@@ -154,12 +126,11 @@ $("login-form").addEventListener("submit", async (e) => {
   const gameVersionId = selectedValue($("login-game-version"));
   const email = $("login-email").value.trim();
   const password = $("login-password").value;
+  const rememberPassword = $("login-remember-password").checked;
   try {
-    session = await invoke("login", { email, password, gameVersionId });
-    if ($("login-remember").checked) localStorage.setItem("email", email);
-    else localStorage.removeItem("email");
-    localStorage.setItem("gameVersionId", gameVersionId);
+    session = await invoke("login", { email, password, gameVersionId, rememberPassword });
     $("login-password").value = "";
+    settings = (await invoke("get_settings")) || settings;
     showUploader();
   } catch (ex) {
     err.textContent = String(ex);
@@ -193,20 +164,42 @@ function showUploader() {
   fillSelect($("opt-guild"), user.guildSelectItems || []);
   fillSelect($("opt-region"), user.regionOrServerSelectItems || [], { placeholder: "Choose a region" });
   fillSelect($("opt-visibility"), user.reportVisibilitySelectItems || []);
-  const savedGuild = localStorage.getItem("guildId");
-  if (savedGuild) $("opt-guild").value = savedGuild;
+  const saved = settings.report || {};
+  if (saved.guildId !== undefined) $("opt-guild").value = JSON.stringify(saved.guildId);
+  if (saved.visibility !== undefined) $("opt-visibility").value = JSON.stringify(saved.visibility);
+  if (saved.regionOrServerId != null) $("opt-region").value = JSON.stringify(saved.regionOrServerId);
   onGuildChange();
+  if (saved.reportTagId != null) $("opt-tag").value = JSON.stringify(saved.reportTagId);
+  $("opt-description").value = saved.description || "";
+  if (settings.includeEntireFile !== undefined && settings.includeEntireFile !== null)
+    $("live-entire").checked = settings.includeEntireFile;
+  if (settings.realTime) $("live-realtime").checked = true;
 
-  const savedDir = localStorage.getItem("liveDir");
-  if (savedDir) $("live-dir").value = savedDir;
+  if (settings.liveDirectory) $("live-dir").value = settings.liveDirectory;
   else invoke("detect_log_directory", { gameVersionId: session.gameVersionId }).then((d) => {
     if (d && !$("live-dir").value) $("live-dir").value = d;
   });
 }
 
+function persistSettings() {
+  let report = null;
+  try {
+    report = reportOptions();
+  } catch {
+    // incomplete selection; keep what was saved before
+  }
+  invoke("save_settings", {
+    patch: {
+      report,
+      liveDirectory: $("live-dir").value.trim(),
+      includeEntireFile: $("live-entire").checked,
+      realTime: $("live-realtime").checked,
+    },
+  }).catch(console.error);
+}
+
 function onGuildChange() {
   const guildId = selectedValue($("opt-guild"));
-  localStorage.setItem("guildId", $("opt-guild").value);
   const personal = guildId === PERSONAL_LOGS_GUILD_ID;
   $("opt-region-wrap").hidden = !personal;
   const tags = (session.user.reportTagSelectItems || {})[String(guildId)] || [];
@@ -214,6 +207,9 @@ function onGuildChange() {
   $("opt-tag").disabled = tags.length === 0;
 }
 $("opt-guild").addEventListener("change", onGuildChange);
+for (const id of ["opt-guild", "opt-region", "opt-tag", "opt-visibility", "opt-description", "live-dir", "live-entire", "live-realtime"]) {
+  $(id).addEventListener("change", persistSettings);
+}
 
 function reportOptions() {
   const guildId = selectedValue($("opt-guild"));
@@ -226,7 +222,8 @@ function reportOptions() {
     regionOrServerId = guild && guild.regionId != null ? guild.regionId : null;
   }
   return {
-    guildId,
+    // Personal Logs (the -1 sentinel) is sent as a null guild id.
+    guildId: guildId === PERSONAL_LOGS_GUILD_ID ? null : guildId,
     regionOrServerId,
     visibility: selectedValue($("opt-visibility")) ?? 0,
     reportTagId: selectedValue($("opt-tag")),
@@ -252,14 +249,14 @@ $("live-browse").addEventListener("click", async () => {
   const path = await invoke("pick_log_directory", { startDir: $("live-dir").value || null });
   if (path) {
     $("live-dir").value = path;
-    localStorage.setItem("liveDir", path);
+    persistSettings();
   }
 });
 $("live-detect").addEventListener("click", async () => {
   const d = await invoke("detect_log_directory", { gameVersionId: session.gameVersionId });
   if (d) {
     $("live-dir").value = d;
-    localStorage.setItem("liveDir", d);
+    persistSettings();
   } else {
     logLine("Could not find a World of Warcraft Logs directory automatically.");
   }
@@ -335,6 +332,7 @@ async function runOperation(command, params, title) {
   }
   setRunning(false);
   showResult(result);
+  return result;
 }
 
 $("upload-start").addEventListener("click", async () => {
@@ -358,7 +356,7 @@ $("live-start").addEventListener("click", async () => {
   } catch (ex) {
     return logLine(ex.message);
   }
-  localStorage.setItem("liveDir", directoryPath);
+  persistSettings();
   await runOperation(
     "start_live_log",
     {

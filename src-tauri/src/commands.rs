@@ -14,7 +14,8 @@ use url::Url;
 use crate::game::{self, GameVersion};
 use crate::operation::{self, Ctx, LiveParams, UploadParams};
 use crate::parser::ParserBridge;
-use crate::session::{self, Credentials, Session};
+use crate::session::{Credentials, Session};
+use crate::settings::{self, Settings};
 use crate::wcl::{self, UserInfo};
 
 pub struct AppState {
@@ -66,10 +67,9 @@ pub async fn client_version() -> String {
     format!("{} (protocol {})", env!("CARGO_PKG_VERSION"), wcl::CLIENT_VERSION)
 }
 
-#[tauri::command]
-pub async fn login(
-    app: AppHandle,
-    state: State<'_, AppState>,
+async fn do_login(
+    app: &AppHandle,
+    state: &AppState,
     email: String,
     password: String,
     game_version_id: String,
@@ -87,26 +87,103 @@ pub async fn login(
         base_url: base_url.clone(),
         game_version_id: game_version_id.clone(),
     });
-
-    session::sync_cookies(&app, &state.wcl, &base_url)?;
-    let url = crate::parser::parser_url(gv.base_url, &game_version_id);
-    // Load the parser now so the first upload does not have to wait for it.
-    if let Err(e) = state.parser.load(&app, &url).await {
-        let _ = app.emit("app-log", serde_json::json!({ "message": format!("Parser load failed: {e}") }));
-    }
-
     Ok(LoginResult { game_version_id, base_url: gv.base_url.to_string(), user })
+}
+
+#[tauri::command]
+pub async fn login(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    email: String,
+    password: String,
+    game_version_id: String,
+    remember_password: bool,
+) -> Result<LoginResult, String> {
+    let result = do_login(&app, &state, email.clone(), password.clone(), game_version_id.clone()).await?;
+    let mut settings = settings::load(&app);
+    if remember_password {
+        settings::store_password(&email, &password)?;
+    } else {
+        settings::delete_password(&email);
+    }
+    settings.email = email;
+    settings.remember_password = remember_password;
+    settings.game_version_id = game_version_id;
+    settings::save(&app, &settings)?;
+    Ok(result)
+}
+
+/// Log in with the credentials saved by a previous "remember password" login.
+#[tauri::command]
+pub async fn auto_login(app: AppHandle, state: State<'_, AppState>) -> Result<Option<LoginResult>, String> {
+    let settings = settings::load(&app);
+    if !settings.remember_password || settings.email.is_empty() {
+        return Ok(None);
+    }
+    let Some(password) = settings::load_password(&settings.email) else {
+        return Ok(None);
+    };
+    let game_version_id = if settings.game_version_id.is_empty() {
+        "warcraft-live".to_string()
+    } else {
+        settings.game_version_id.clone()
+    };
+    do_login(&app, &state, settings.email.clone(), password, game_version_id).await.map(Some)
+}
+
+#[tauri::command]
+pub async fn get_settings(app: AppHandle) -> Settings {
+    settings::load(&app)
+}
+
+/// Persist UI settings. The password is never part of this payload.
+#[tauri::command]
+pub async fn save_settings(app: AppHandle, patch: Settings) -> Result<(), String> {
+    let mut current = settings::load(&app);
+    current.report = patch.report.or(current.report);
+    if !patch.live_directory.is_empty() {
+        current.live_directory = patch.live_directory;
+    }
+    current.include_entire_file = patch.include_entire_file.or(current.include_entire_file);
+    current.real_time = patch.real_time.or(current.real_time);
+    settings::save(&app, &current)
+}
+
+#[derive(Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct LaunchOptions {
+    /// `--upload <file>`: auto-login, upload, print the result, exit.
+    pub upload_file: Option<String>,
+}
+
+#[tauri::command]
+pub async fn get_launch_options() -> LaunchOptions {
+    let args: Vec<String> = std::env::args().collect();
+    let upload_file = args
+        .iter()
+        .position(|a| a == "--upload")
+        .and_then(|i| args.get(i + 1).cloned());
+    LaunchOptions { upload_file }
+}
+
+#[tauri::command]
+pub async fn exit_app(app: AppHandle, code: i32) {
+    app.exit(code);
 }
 
 #[tauri::command]
 pub async fn logout(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let session = state.session.lock().unwrap().take();
-    *state.credentials.lock().unwrap() = None;
+    if let Some(creds) = state.credentials.lock().unwrap().take() {
+        settings::delete_password(&creds.email);
+    }
+    let mut settings = settings::load(&app);
+    settings.remember_password = false;
+    let _ = settings::save(&app, &settings);
+    state.parser.shutdown().await;
     if let Some(session) = session {
         let _ = state.wcl.logout(&session.base_url).await;
-        session::clear_cookies(&app, &session.base_url);
     }
-    let _ = app.emit("parser-load", serde_json::json!({ "url": "about:blank" }));
     Ok(())
 }
 
@@ -180,6 +257,10 @@ fn finish_operation(app: &AppHandle, state: &AppState, ctx: &Ctx, result: operat
             OperationResult { ok: false, cancelled, report_code: None, report_url: None, error: Some(e.to_string()) }
         }
     };
+    log::info!(
+        "operation finished: ok={} cancelled={} report={:?} error={:?}",
+        out.ok, out.cancelled, out.report_url, out.error
+    );
     let _ = app.emit("operation-finished", &out);
     out
 }
@@ -219,31 +300,20 @@ pub async fn cancel_operation(state: State<'_, AppState>) -> Result<bool, String
 }
 
 #[tauri::command]
-pub async fn parser_loaded(state: State<'_, AppState>) -> Result<(), String> {
-    state.parser.mark_loaded();
-    Ok(())
+pub async fn ui_log(message: String) {
+    log::info!("[ui] {message}");
 }
 
+/// Fetch the parser and run one line through the Node harness. Returns the
+/// parser version on success; used to validate the pipeline without uploading.
 #[tauri::command]
-pub async fn parser_failed(state: State<'_, AppState>, message: String) -> Result<(), String> {
-    state.parser.mark_failed(message);
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn parser_response(
-    state: State<'_, AppState>,
-    request_id: u64,
-    payload: Option<Value>,
-    error: Option<String>,
-) -> Result<(), String> {
-    let reply = match (payload, error) {
-        (_, Some(err)) => Err(err),
-        (Some(value), None) => Ok(value),
-        (None, None) => Err("empty reply".to_string()),
-    };
-    state.parser.resolve(request_id, reply);
-    Ok(())
+pub async fn parser_selftest(app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
+    let session = state.session.lock().unwrap().clone().ok_or("not logged in")?;
+    let url = crate::parser::parser_url(session.base_url.as_str(), &session.game_version_id);
+    let code = state.wcl.fetch_parser_code(&session.base_url, &url).await.map_err(|e| e.to_string())?;
+    let version = state.parser.start(&app, &code.gamedata_code, &code.parser_code, code.parser_version.clone()).await.map_err(|e| e.to_string())?;
+    let v = state.parser.get_version(&app).await.map_err(|e| e.to_string())?;
+    Ok(format!("bundle={} version={} get_version={}", code.bundle_url, crate::parser::scalar(&version), crate::parser::scalar(&v)))
 }
 
 #[tauri::command]

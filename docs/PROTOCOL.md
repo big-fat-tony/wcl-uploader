@@ -5,7 +5,9 @@ endpoints are relative to a game-version base URL such as
 `https://www.warcraftlogs.com`, `https://classic.warcraftlogs.com`,
 `https://sod.warcraftlogs.com`, `https://fresh.warcraftlogs.com`, ...
 
-Every request carries the session cookie (`wcl_session`, `XSRF-TOKEN`;
+Every request must carry an Electron-like `User-Agent` (e.g.
+`... archon/9.6.43 Chrome/142.0.0.0 Electron/39.8.10 Safari/537.36`); the
+parser route answers `404` to other user agents. Every request carries the session cookie (`wcl_session`, `XSRF-TOKEN`;
 `SameSite=None; Secure`, 2 h `Max-Age`, refreshed on each response). The server
 reflects any `Origin` with `Access-Control-Allow-Credentials: true`, so a
 non-browser origin can use `fetch(..., { credentials: "include" })`.
@@ -113,7 +115,7 @@ Unsolicited messages from the parser: `set-warning-text { data }` and
 5. `clear-fights` + `clear-state`, then
    `POST /desktop-client/terminate-report/<code>` (empty body).
 
-`segmentId` starts at 0 and is replaced by the `nextSegmentId` returned from
+`segmentId` starts at 1 and is replaced by the `nextSegmentId` returned from
 each `add-report-segment` response.
 
 ### 3.1 Master table
