@@ -26,6 +26,8 @@ chrono = "0.4"
 log = "0.4"
 env_logger = "0.11"
 open = "5"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 url = "2"
 keyring = { version = "3", features = ["windows-native"] }
 

@@ -1,0 +1,53 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # The parser runs in a Node sidecar; bundle a Node runtime the installer
+      # ships. node.exe is gitignored, so fetch it here into resources/.
+      - name: Fetch bundled Node runtime
+        shell: pwsh
+        run: |
+          $ver = "v22.11.0"
+          $url = "https://nodejs.org/dist/$ver/win-x64/node.exe"
+          Invoke-WebRequest -Uri $url -OutFile "src-tauri/resources/node.exe"
+          (Get-Item "src-tauri/resources/node.exe").Length
+
+      - name: Set versions from tag
+        shell: pwsh
+        run: |
+          $v = "${{ github.ref_name }}".TrimStart("v")
+          (Get-Content src-tauri/tauri.conf.json) -replace '"version": "[^"]*"', "`"version`": `"$v`"" | Set-Content src-tauri/tauri.conf.json
+          npm version $v --no-git-tag-version --allow-same-version
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend deps
+        run: npm install
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Logs Uploader ${{ github.ref_name }}"
+          releaseBody: |
+            Warcraft Logs uploader for Windows (x64). Node runtime bundled.
+            The installer auto-updates from this repo's releases.
+          releaseDraft: false
+          prerelease: false

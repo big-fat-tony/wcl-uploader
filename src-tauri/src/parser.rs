@@ -156,7 +156,7 @@ impl ParserBridge {
         self.shutdown().await;
         *self.version.lock().await = parser_version;
 
-        let node = find_node().ok_or(Error::NodeNotFound)?;
+        let node = find_node(app).ok_or(Error::NodeNotFound)?;
         let harness = harness_path(app)?;
         let mut child = tokio::process::Command::new(&node)
             .arg(&harness)
@@ -333,8 +333,9 @@ fn harness_path(app: &AppHandle) -> Result<PathBuf> {
     Err(Error::StartFailed("parser-harness.js not found".into()))
 }
 
-/// Find a Node.js executable: `LU_NODE`, then `node` on `PATH`.
-fn find_node() -> Option<PathBuf> {
+/// Find a Node.js executable: `LU_NODE`, then the bundled runtime shipped next
+/// to the app, then `node` on `PATH`.
+fn find_node(app: &AppHandle) -> Option<PathBuf> {
     if let Some(explicit) = std::env::var_os("LU_NODE") {
         let p = PathBuf::from(explicit);
         if p.exists() {
@@ -342,6 +343,11 @@ fn find_node() -> Option<PathBuf> {
         }
     }
     let exe = if cfg!(windows) { "node.exe" } else { "node" };
+    if let Ok(bundled) = app.path().resolve(exe, tauri::path::BaseDirectory::Resource) {
+        if bundled.exists() {
+            return Some(bundled);
+        }
+    }
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path).map(|dir| dir.join(exe)).find(|c| c.exists())
 }

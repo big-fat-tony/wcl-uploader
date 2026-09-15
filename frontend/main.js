@@ -376,3 +376,25 @@ $("cancel-btn").addEventListener("click", async () => {
 });
 
 init().catch((e) => logLine(`Init failed: ${e}`));
+
+// --- Auto-update -----------------------------------------------------------
+listen("update-available", ({ payload }) => {
+  const banner = document.getElementById("update-banner");
+  document.getElementById("update-message").textContent =
+    `Version ${payload.version} is available.`;
+  banner.hidden = false;
+});
+listen("download-progress", ({ payload }) => {
+  const prog = document.getElementById("update-progress");
+  const bar = document.getElementById("update-bar");
+  prog.hidden = false;
+  if (payload.total) bar.style.width = `${(payload.downloaded / payload.total) * 100}%`;
+});
+document.getElementById("update-now").addEventListener("click", () => {
+  document.getElementById("update-now").disabled = true;
+  document.getElementById("update-message").textContent = "Downloading update…";
+  invoke("install_update").catch((e) => logLine(`Update failed: ${e}`));
+});
+document.getElementById("update-dismiss").addEventListener("click", () => {
+  document.getElementById("update-banner").hidden = true;
+});

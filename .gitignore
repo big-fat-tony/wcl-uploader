@@ -3,3 +3,6 @@
 /src-tauri/gen
 /node_modules
 *.log
+
+# bundled Node runtime (fetched at package time, not committed)
+/src-tauri/resources/node.exe

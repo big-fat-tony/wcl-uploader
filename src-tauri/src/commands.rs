@@ -316,6 +316,32 @@ pub async fn parser_selftest(app: AppHandle, state: State<'_, AppState>) -> Resu
     Ok(format!("bundle={} version={} get_version={}", code.bundle_url, crate::parser::scalar(&version), crate::parser::scalar(&v)))
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DownloadProgress {
+    downloaded: u64,
+    total: Option<u64>,
+}
+
+/// Download and install the update found at startup, then relaunch.
+#[tauri::command]
+pub async fn install_update(app: AppHandle, state: State<'_, crate::PendingUpdate>) -> Result<(), String> {
+    let update = state.0.lock().unwrap().take().ok_or("no pending update")?;
+    let mut downloaded: u64 = 0;
+    let app_clone = app.clone();
+    update
+        .download_and_install(
+            move |chunk, total| {
+                downloaded += chunk as u64;
+                let _ = app_clone.emit("download-progress", DownloadProgress { downloaded, total });
+            },
+            || {},
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    app.restart();
+}
+
 #[tauri::command]
 pub async fn open_external(url: String) -> Result<(), String> {
     if !(url.starts_with("https://") || url.starts_with("http://")) {
