@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Logs Uploader</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">▲</span>
+      <span>Logs Uploader</span>
+      <span class="muted" id="version-label"></span>
+    </div>
+    <div class="session" id="session-bar" hidden>
+      <span id="session-label" class="muted"></span>
+      <button id="logout-btn" class="ghost">Log out</button>
+    </div>
+  </header>
+
+  <main>
+    <!-- Login -->
+    <section id="login-view" class="card narrow">
+      <h1>Sign in to Warcraft Logs</h1>
+      <p class="muted">Your credentials are sent only to warcraftlogs.com and kept in memory for this session.</p>
+      <form id="login-form">
+        <label>Game version
+          <select id="login-game-version"></select>
+        </label>
+        <label>Email
+          <input id="login-email" type="email" autocomplete="username" required />
+        </label>
+        <label>Password
+          <input id="login-password" type="password" autocomplete="current-password" required />
+        </label>
+        <label class="row"><input id="login-remember" type="checkbox" /> Remember email</label>
+        <div class="actions">
+          <button id="login-btn" type="submit" class="primary">Log in</button>
+        </div>
+        <p id="login-error" class="error" hidden></p>
+      </form>
+    </section>
+
+    <!-- Uploader -->
+    <section id="uploader-view" hidden>
+      <nav class="tabs">
+        <button class="tab active" data-tab="upload">Upload a log</button>
+        <button class="tab" data-tab="live">Live log</button>
+      </nav>
+
+      <div class="card">
+        <h2>Report</h2>
+        <div class="grid">
+          <label>Guild
+            <select id="opt-guild"></select>
+          </label>
+          <label id="opt-region-wrap">Region / server
+            <select id="opt-region"></select>
+          </label>
+          <label id="opt-tag-wrap">Report tag
+            <select id="opt-tag"></select>
+          </label>
+          <label>Visibility
+            <select id="opt-visibility"></select>
+          </label>
+          <label class="span-2">Description
+            <input id="opt-description" type="text" placeholder="Optional" />
+          </label>
+        </div>
+      </div>
+
+      <div class="card tab-panel" data-panel="upload">
+        <h2>Upload a log</h2>
+        <div class="file-row">
+          <input id="upload-path" type="text" placeholder="C:\...\World of Warcraft\_retail_\Logs\WoWCombatLog-....txt" />
+          <button id="upload-browse" class="ghost">Browse…</button>
+        </div>
+        <div class="actions">
+          <button id="upload-start" class="primary">Upload</button>
+        </div>
+      </div>
+
+      <div class="card tab-panel" data-panel="live" hidden>
+        <h2>Live log</h2>
+        <div class="file-row">
+          <input id="live-dir" type="text" placeholder="C:\...\World of Warcraft\_retail_\Logs" />
+          <button id="live-browse" class="ghost">Browse…</button>
+          <button id="live-detect" class="ghost">Detect</button>
+        </div>
+        <label class="row"><input id="live-entire" type="checkbox" checked /> Include the entire current file in the report</label>
+        <label class="row"><input id="live-realtime" type="checkbox" /> Real-time uploading (upload fights while they are in progress)</label>
+        <div class="actions">
+          <button id="live-start" class="primary">Start live logging</button>
+        </div>
+      </div>
+
+      <div class="card" id="progress-card" hidden>
+        <div class="progress-head">
+          <h2 id="progress-title">Working…</h2>
+          <button id="cancel-btn" class="ghost">Cancel</button>
+        </div>
+        <div class="bar"><div id="progress-bar" class="bar-fill"></div></div>
+        <dl class="stats">
+          <dt>Phase</dt><dd id="stat-phase">–</dd>
+          <dt>File</dt><dd id="stat-file">–</dd>
+          <dt>Lines parsed</dt><dd id="stat-lines">0</dd>
+          <dt>Segments</dt><dd id="stat-segments">0</dd>
+          <dt>Elapsed</dt><dd id="stat-elapsed">0s</dd>
+          <dt>Report</dt><dd id="stat-report">–</dd>
+        </dl>
+      </div>
+
+      <div class="card" id="result-card" hidden>
+        <h2 id="result-title"></h2>
+        <p id="result-body"></p>
+        <div class="actions">
+          <button id="result-open" class="primary" hidden>Open report</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="card log-card">
+      <div class="progress-head">
+        <h2>Log</h2>
+        <button id="log-clear" class="ghost">Clear</button>
+      </div>
+      <pre id="log"></pre>
+    </section>
+  </main>
+
+  <!-- The Warcraft Logs parser page. Hidden; driven via postMessage. -->
+  <iframe id="parser" sandbox="allow-scripts" title="parser" hidden></iframe>
+
+  <script src="main.js"></script>
+</body>
+</html>
