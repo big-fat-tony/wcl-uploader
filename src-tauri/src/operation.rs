@@ -59,6 +59,10 @@ pub struct ReportOptions {
 #[serde(rename_all = "camelCase")]
 pub struct UploadParams {
     pub file_path: String,
+    /// Ignore any saved resume state and start a fresh report (finalizing the
+    /// previous one for this file).
+    #[serde(default)]
+    pub new_report: bool,
     #[serde(flatten)]
     pub report: ReportOptions,
 }
@@ -466,8 +470,16 @@ pub async fn upload_log(ctx: &Ctx, params: UploadParams) -> Result<String> {
     // Resume a prior upload of this same growing file, if we have valid state
     // for it on this site (skip everything already sent).
     let base_url = ctx.base_url.as_str().to_string();
-    let saved = crate::upload_state::get(&ctx.app, &file.file_path).filter(|e| {
-        e.base_url == base_url && e.position > 0 && file.size >= e.position
+    let existing = crate::upload_state::get(&ctx.app, &file.file_path);
+    if params.new_report {
+        if let Some(old) = &existing {
+            ctx.log(format!("Finalizing previous report {}", old.report_code));
+            ctx.terminate_report(&old.report_code).await;
+        }
+        crate::upload_state::clear(&ctx.app, &file.file_path);
+    }
+    let saved = existing.filter(|e| {
+        !params.new_report && e.base_url == base_url && e.position > 0 && file.size >= e.position
     });
 
     let (code, resume_through) = if let Some(entry) = saved {

@@ -344,7 +344,9 @@ $("upload-start").addEventListener("click", async () => {
   } catch (ex) {
     return logLine(ex.message);
   }
-  await runOperation("start_upload", { filePath, ...report }, "Uploading log");
+  const newReport = $("upload-new-report").checked;
+  const result = await runOperation("start_upload", { filePath, newReport, ...report }, "Uploading log");
+  if (result && result.ok) $("upload-new-report").checked = false; // one-shot
 });
 
 $("live-start").addEventListener("click", async () => {
