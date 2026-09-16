@@ -113,6 +113,9 @@ struct PartOptions<'a> {
     is_real_time: bool,
     push_fight_if_needed: bool,
     check_first_line: bool,
+    /// Fights ending at/below this byte offset were already uploaded (resume):
+    /// parse them for state but don't re-send them.
+    resume_through: u64,
 }
 
 impl Ctx {
@@ -165,6 +168,14 @@ impl Ctx {
 
     fn phase(&self, phase: &str) {
         self.progress(|p| p.phase = phase.to_string());
+    }
+
+    fn set_next_segment_id(&self, id: i64) {
+        self.progress.lock().unwrap().next_segment_id = id;
+    }
+
+    fn next_segment_id(&self) -> i64 {
+        self.progress.lock().unwrap().next_segment_id
     }
 
     pub fn log(&self, message: impl Into<String>) {
@@ -364,6 +375,12 @@ impl Ctx {
             return Ok(false);
         }
 
+        // Resume: this region was already uploaded — parsed for state, but skip re-sending.
+        if opts.resume_through > 0 && part.current_position <= opts.resume_through {
+            self.parser.clear_fights(&self.app).await?;
+            return Ok(false);
+        }
+
         let info = self.parser.collect_master_info(&self.app, code).await?;
         if !info.success {
             self.parser.reset(&self.app).await;
@@ -446,7 +463,25 @@ pub async fn upload_log(ctx: &Ctx, params: UploadParams) -> Result<String> {
     }
     ctx.log(format!("Reading file: {} ({} bytes)", file.file_name, file.size));
 
-    let code = ctx.create_report(&file.file_name, &params.report, 2).await?;
+    // Resume a prior upload of this same growing file, if we have valid state
+    // for it on this site (skip everything already sent).
+    let base_url = ctx.base_url.as_str().to_string();
+    let saved = crate::upload_state::get(&ctx.app, &file.file_path).filter(|e| {
+        e.base_url == base_url && e.position > 0 && file.size >= e.position
+    });
+
+    let (code, resume_through) = if let Some(entry) = saved {
+        ctx.parser.set_report_code(&ctx.app, &entry.report_code).await?;
+        ctx.set_next_segment_id(entry.next_segment_id);
+        ctx.log(format!(
+            "Resuming report {} — {} MB already uploaded; sending only new fights",
+            entry.report_code,
+            entry.position / 1_000_000
+        ));
+        (entry.report_code, entry.position)
+    } else {
+        (ctx.create_report(&file.file_name, &params.report, 2).await?, 0)
+    };
 
     let result: Result<()> = async {
         let mut position = 0u64;
@@ -462,8 +497,17 @@ pub async fn upload_log(ctx: &Ctx, params: UploadParams) -> Result<String> {
                 is_real_time: false,
                 push_fight_if_needed: part.end_of_file,
                 check_first_line: first,
+                resume_through,
             };
-            ctx.upload_file_part(&file, &part, &code, &opts).await?;
+            let uploaded = ctx.upload_file_part(&file, &part, &code, &opts).await?;
+            if uploaded {
+                crate::upload_state::set(&ctx.app, &file.file_path, crate::upload_state::Entry {
+                    report_code: code.clone(),
+                    position: part.current_position,
+                    next_segment_id: ctx.next_segment_id(),
+                    base_url: base_url.clone(),
+                });
+            }
             first = false;
             if part.end_of_file {
                 break;
@@ -473,7 +517,9 @@ pub async fn upload_log(ctx: &Ctx, params: UploadParams) -> Result<String> {
     }
     .await;
 
-    ctx.terminate_report(&code).await;
+    // Intentionally not terminated: the same growing log file can be uploaded
+    // again later to append its new fights to this report (see resume above).
+    // The report is still fully viewable and processed in the meantime.
     result?;
     Ok(code)
 }
@@ -535,6 +581,7 @@ pub async fn live_log(ctx: &Ctx, params: LiveParams) -> Result<String> {
                     is_real_time: false,
                     push_fight_if_needed: false,
                     check_first_line: false,
+                    resume_through: 0,
                 };
                 ctx.upload_file_part(&file, &part, &code, &opts).await?;
                 if part.end_of_file || part.lines.is_empty() {
@@ -566,6 +613,7 @@ pub async fn live_log(ctx: &Ctx, params: LiveParams) -> Result<String> {
                         is_real_time: params.real_time,
                         push_fight_if_needed: true,
                         check_first_line: false,
+                        resume_through: 0,
                     };
                     let _ = ctx.upload_file_part(file, &part, &code, &opts).await;
                 }
@@ -638,6 +686,7 @@ async fn drain(
             is_real_time: params.real_time,
             push_fight_if_needed: ctx.cancelled() || idle,
             check_first_line: false,
+            resume_through: 0,
         };
         ctx.upload_file_part(file, &part, code, &opts).await?;
         if part.end_of_file || part.lines.is_empty() {

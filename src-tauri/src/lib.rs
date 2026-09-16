@@ -4,6 +4,7 @@ mod logfile;
 mod operation;
 mod parser;
 mod session;
+mod upload_state;
 mod settings;
 mod wcl;
 
