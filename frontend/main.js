@@ -377,6 +377,7 @@ $("cancel-btn").addEventListener("click", async () => {
   await invoke("cancel_operation");
 });
 
+loadAutostart();
 init().catch((e) => logLine(`Init failed: ${e}`));
 
 // --- Auto-update -----------------------------------------------------------
@@ -399,4 +400,14 @@ document.getElementById("update-now").addEventListener("click", () => {
 });
 document.getElementById("update-dismiss").addEventListener("click", () => {
   document.getElementById("update-banner").hidden = true;
+});
+
+// --- Autostart ---
+async function loadAutostart() {
+  try { document.getElementById("autostart").checked = await invoke("get_autostart"); } catch {}
+}
+document.getElementById("autostart").addEventListener("change", async (e) => {
+  const el = e.target;
+  try { await invoke("set_autostart", { enabled: el.checked }); }
+  catch (err) { el.checked = !el.checked; console.warn("autostart failed:", err); }
 });

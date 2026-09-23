@@ -6,6 +6,9 @@
     "main"
   ],
   "permissions": [
+    "autostart:allow-disable",
+    "autostart:allow-enable",
+    "autostart:allow-is-enabled",
     "core:default",
     "process:default",
     "updater:default"

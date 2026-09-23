@@ -32,6 +32,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec![])))
         .manage(state)
         .manage(PendingUpdate(Mutex::new(None)))
         .setup(|app| {
@@ -63,6 +64,8 @@ pub fn run() {
             commands::ui_log,
             commands::parser_selftest,
             commands::install_update,
+            commands::get_autostart,
+            commands::set_autostart,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
