@@ -105,6 +105,25 @@ pub struct LogFilePosition {
     pub starting_position: u64,
 }
 
+/// A note of where a live parser's accumulated state currently stands, so a
+/// re-upload of the same growing file *within the same session* can continue
+/// from here instead of resetting the parser and reparsing from byte 0. Only
+/// valid while the parser process is alive and has not been reset; wiped by
+/// `start`/`shutdown`/`clear_state` (and thus `reset`).
+#[derive(Debug, Clone)]
+pub struct Checkpoint {
+    /// Site the report lives on (state is per game-version/site).
+    pub base_url: String,
+    /// File the accumulated state was built from.
+    pub file_path: String,
+    /// Report the state is bound to (`expectedReportCode` in the parser).
+    pub report_code: String,
+    /// Byte offset the parser has contiguously parsed through.
+    pub position: u64,
+    /// Next segment id to use when appending.
+    pub next_segment_id: i64,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ParseLinesReply {
@@ -137,11 +156,37 @@ struct Process {
 pub struct ParserBridge {
     proc: Mutex<Option<Process>>,
     version: Mutex<Value>,
+    checkpoint: Mutex<Option<Checkpoint>>,
 }
 
 impl ParserBridge {
     pub async fn is_ready(&self) -> bool {
         self.proc.lock().await.is_some()
+    }
+
+    /// Record where the live parser's accumulated state now stands.
+    pub async fn set_checkpoint(&self, checkpoint: Checkpoint) {
+        *self.checkpoint.lock().await = Some(checkpoint);
+    }
+
+    /// Discard the checkpoint (parser state can no longer be trusted for a
+    /// same-session continue).
+    pub async fn clear_checkpoint(&self) {
+        *self.checkpoint.lock().await = None;
+    }
+
+    /// The current checkpoint if the parser is still alive and its state was
+    /// built for this exact site + file.
+    pub async fn matching_checkpoint(&self, base_url: &str, file_path: &str) -> Option<Checkpoint> {
+        if !self.is_ready().await {
+            return None;
+        }
+        self.checkpoint
+            .lock()
+            .await
+            .as_ref()
+            .filter(|c| c.base_url == base_url && c.file_path == file_path)
+            .cloned()
     }
 
     /// Spawn the Node harness and load the parser code. Replaces any running
@@ -155,6 +200,7 @@ impl ParserBridge {
     ) -> Result<Value> {
         self.shutdown().await;
         *self.version.lock().await = parser_version;
+        self.clear_checkpoint().await;
 
         let node = find_node(app).ok_or(Error::NodeNotFound)?;
         let harness = harness_path(app)?;
@@ -195,6 +241,7 @@ impl ParserBridge {
     }
 
     pub async fn shutdown(&self) {
+        self.clear_checkpoint().await;
         if let Some(mut proc) = self.proc.lock().await.take() {
             let _ = proc.stdin.shutdown().await;
             let _ = proc.child.kill().await;
@@ -220,6 +267,8 @@ impl ParserBridge {
     }
 
     pub async fn clear_state(&self, _app: &AppHandle) -> Result<()> {
+        // Clearing parser state (actors/abilities/…) invalidates any checkpoint.
+        self.clear_checkpoint().await;
         self.call(json!({ "action": "clear-state" })).await.map(drop)
     }
 

@@ -13,7 +13,7 @@ use tauri::{AppHandle, Emitter};
 use url::Url;
 
 use crate::logfile::{self, FileInfo, FilePart};
-use crate::parser::{self, scalar, FightsResult, LogFilePosition, ParserBridge};
+use crate::parser::{self, scalar, Checkpoint, FightsResult, LogFilePosition, ParserBridge};
 use crate::session::Credentials;
 use crate::wcl::{self, CreateReport, SegmentParameters, CLIENT_VERSION};
 
@@ -364,7 +364,12 @@ impl Ctx {
             self.progress(|p| p.lines_parsed += part.lines.len() as u64);
         }
 
-        let push = opts.push_fight_if_needed || (part.end_of_file && !opts.is_live_log);
+        // Complete fights are pushed as they are parsed; only `push_fight_if_needed`
+        // force-pushes a still-open trailing fight. `upload_log` deliberately
+        // never sets it (the report stays appendable, so an unfinished fight is
+        // left for the next upload — which lets a same-session re-upload continue
+        // in memory without splitting that fight across two segments).
+        let push = opts.push_fight_if_needed;
         let mut fights = self.parser.collect_fights(&self.app, push, false).await?;
         let mut in_progress = false;
         if opts.is_live_log && fights.fights.is_empty() {
@@ -458,7 +463,6 @@ impl Ctx {
 /// Upload a finished combat log file. Returns the report code.
 pub async fn upload_log(ctx: &Ctx, params: UploadParams) -> Result<String> {
     ctx.ensure_parser().await?;
-    ctx.parser.reset(&ctx.app).await;
 
     let path = Path::new(&params.file_path);
     let file = logfile::file_info(path)?;
@@ -482,21 +486,49 @@ pub async fn upload_log(ctx: &Ctx, params: UploadParams) -> Result<String> {
         !params.new_report && e.base_url == base_url && e.position > 0 && file.size >= e.position
     });
 
-    let (code, resume_through) = if let Some(entry) = saved {
-        ctx.parser.set_report_code(&ctx.app, &entry.report_code).await?;
-        ctx.set_next_segment_id(entry.next_segment_id);
-        ctx.log(format!(
-            "Resuming report {} — {} MB already uploaded; sending only new fights",
-            entry.report_code,
-            entry.position / 1_000_000
-        ));
-        (entry.report_code, entry.position)
+    // Fast path: if this session's parser is still alive and already holds the
+    // accumulated state for this exact file+report, continue from where it left
+    // off instead of resetting and reparsing the whole file to rebuild that
+    // state. Only used when it agrees with the on-disk resume point.
+    let live = if params.new_report {
+        None
     } else {
-        (ctx.create_report(&file.file_name, &params.report, 2).await?, 0)
+        ctx.parser.matching_checkpoint(&base_url, &file.file_path).await
+    }
+    .filter(|cp| {
+        saved.as_ref().map(|s| s.report_code == cp.report_code).unwrap_or(false)
+            && file.size >= cp.position
+    });
+
+    let (code, resume_through, start_position) = if let Some(cp) = live {
+        // Parser already parsed [0, cp.position) for this report — continue.
+        ctx.set_next_segment_id(saved.as_ref().map_or(cp.next_segment_id, |s| s.next_segment_id));
+        ctx.log(format!(
+            "Continuing report {} in this session from byte {} — no reparse",
+            cp.report_code, cp.position
+        ));
+        // Everything at/below cp.position is already parsed and (if complete)
+        // uploaded, so there is nothing to skip when reading from there.
+        (cp.report_code, 0, cp.position)
+    } else {
+        // No usable in-memory state: reset and (re)build state from byte 0.
+        ctx.parser.reset(&ctx.app).await;
+        if let Some(entry) = saved {
+            ctx.parser.set_report_code(&ctx.app, &entry.report_code).await?;
+            ctx.set_next_segment_id(entry.next_segment_id);
+            ctx.log(format!(
+                "Resuming report {} — {} MB already uploaded; sending only new fights",
+                entry.report_code,
+                entry.position / 1_000_000
+            ));
+            (entry.report_code, entry.position, 0)
+        } else {
+            (ctx.create_report(&file.file_name, &params.report, 2).await?, 0, 0)
+        }
     };
 
-    let result: Result<()> = async {
-        let mut position = 0u64;
+    let result: Result<u64> = async {
+        let mut position = start_position;
         let mut first = true;
         loop {
             ctx.check_cancelled()?;
@@ -507,8 +539,13 @@ pub async fn upload_log(ctx: &Ctx, params: UploadParams) -> Result<String> {
                 raids: &[],
                 is_live_log: false,
                 is_real_time: false,
-                push_fight_if_needed: part.end_of_file,
-                check_first_line: first,
+                // Leave a still-open trailing fight for the next upload rather
+                // than force-pushing a partial (keeps the report appendable and
+                // the parser at a clean continuation point — see upload_file_part).
+                push_fight_if_needed: false,
+                // The first line only needs the "is this a combat log?" check
+                // when we start from the top; a resumed read starts mid-log.
+                check_first_line: first && start_position == 0,
                 resume_through,
             };
             let uploaded = ctx.upload_file_part(&file, &part, &code, &opts).await?;
@@ -525,15 +562,35 @@ pub async fn upload_log(ctx: &Ctx, params: UploadParams) -> Result<String> {
                 break;
             }
         }
-        Ok(())
+        Ok(position)
     }
     .await;
 
     // Intentionally not terminated: the same growing log file can be uploaded
     // again later to append its new fights to this report (see resume above).
     // The report is still fully viewable and processed in the meantime.
-    result?;
-    Ok(code)
+    match result {
+        // Remember where the live parser now stands so a re-upload of this
+        // growing file this session can continue without reparsing.
+        Ok(position) => {
+            ctx.parser
+                .set_checkpoint(Checkpoint {
+                    base_url,
+                    file_path: file.file_path.clone(),
+                    report_code: code.clone(),
+                    position,
+                    next_segment_id: ctx.next_segment_id(),
+                })
+                .await;
+            Ok(code)
+        }
+        // Cancelled or errored partway: parser state is uncertain, so drop the
+        // checkpoint and force a clean rebuild next time.
+        Err(e) => {
+            ctx.parser.clear_checkpoint().await;
+            Err(e)
+        }
+    }
 }
 
 /// Tail the newest combat log in a directory until cancelled. Returns the
